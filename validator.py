@@ -36,46 +36,36 @@ def run_test_gate(cfg: RepoConfig, cwd: str) -> ValidationResult:
     return ValidationResult(passed=True, reason="tests passed")
 
 
-def run_criteria_gate(task: Task, diff: str, cwd: str) -> ValidationResult:
-    if not task.acceptance:
-        return ValidationResult(passed=True, reason="skipped — no acceptance criteria defined")
+def run_review_gate(task: Task, diff: str, cwd: str) -> ValidationResult:
+    """Single Claude call: checks acceptance criteria AND confirms task accomplished."""
+    if not diff.strip():
+        return ValidationResult(passed=False, reason="diff is empty — Claude may not have committed changes")
 
-    criteria_list = "\n".join(f"- {c}" for c in task.acceptance)
+    criteria_section = ""
+    if task.acceptance:
+        criteria_list = "\n".join(f"- {c}" for c in task.acceptance)
+        criteria_section = f"\n\n## Acceptance Criteria\n{criteria_list}"
+
     prompt = (
-        f"You are a code reviewer. Given the following git diff and acceptance criteria, "
-        f"check whether each criterion is met.\n\n"
+        f"You are a senior code reviewer. Review this git diff for the task below.\n\n"
+        f"## Task\n{task.title}{criteria_section}\n\n"
         f"## Git Diff\n```\n{diff}\n```\n\n"
-        f"## Acceptance Criteria\n{criteria_list}\n\n"
-        f"Reply with ONLY valid JSON: "
-        f'{{\"passed\": true/false, \"unmet\": [\"criterion text if unmet\"]}}'
-    )
-    result = run_claude(prompt, cwd=cwd)
-    try:
-        data = json.loads(_extract_json(result.output))
-        if data.get("passed"):
-            return ValidationResult(passed=True, reason="all criteria met")
-        unmet = data.get("unmet", [])
-        return ValidationResult(passed=False, reason="; ".join(unmet))
-    except (json.JSONDecodeError, KeyError):
-        return ValidationResult(passed=False, reason=f"criteria check parse error: {result.output[:200]}")
-
-
-def run_diff_review_gate(task: Task, diff: str, cwd: str) -> ValidationResult:
-    prompt = (
-        f"You are a senior code reviewer. Did this git diff accomplish the task?\n\n"
-        f"## Task\n{task.title}\n\n"
-        f"## Git Diff\n```\n{diff}\n```\n\n"
-        f"Reply with ONLY valid JSON: "
-        f'{{\"passed\": true/false, \"reason\": \"one sentence\"}}'
+        f"Reply with ONLY valid JSON:\n"
+        f'{{"passed": true/false, "reason": "one sentence summary", '
+        f'"unmet": ["criterion text if unmet — empty list if all met or no criteria"]}}'
     )
     result = run_claude(prompt, cwd=cwd)
     try:
         data = json.loads(_extract_json(result.output))
         if data.get("passed"):
             return ValidationResult(passed=True, reason=data.get("reason", "task accomplished"))
-        return ValidationResult(passed=False, reason=data.get("reason", "reviewer rejected diff"))
+        unmet = data.get("unmet", [])
+        reason = data.get("reason", "reviewer rejected diff")
+        if unmet:
+            reason = f"{reason} — unmet: {'; '.join(unmet)}"
+        return ValidationResult(passed=False, reason=reason)
     except (json.JSONDecodeError, KeyError):
-        return ValidationResult(passed=False, reason=f"diff review parse error: {result.output[:200]}")
+        return ValidationResult(passed=False, reason=f"review parse error: {result.output[:200]}")
 
 
 def _extract_json(text: str) -> str:

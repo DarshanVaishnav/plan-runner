@@ -1,6 +1,6 @@
 from unittest.mock import patch, MagicMock
 from repo_detect import RepoConfig
-from validator import run_build_gate, run_test_gate, ValidationResult, run_criteria_gate, run_diff_review_gate
+from validator import run_build_gate, run_test_gate, ValidationResult, run_review_gate
 from plan_parser import Task, TaskStatus
 
 
@@ -65,52 +65,40 @@ def _make_task(acceptance=None):
     )
 
 
-def test_criteria_gate_passes_when_claude_says_yes():
+def test_review_gate_passes_when_claude_says_yes():
     task = _make_task()
     with patch("validator.run_claude") as mock_claude:
         mock_claude.return_value = MagicMock(
-            success=True, output='{"passed": true, "unmet": []}'
+            success=True, output='{"passed": true, "reason": "all good", "unmet": []}'
         )
-        result = run_criteria_gate(task, diff="+ def hello(): return 'hello world'", cwd="/tmp")
+        result = run_review_gate(task, diff="+ def hello(): return 'hello world'", cwd="/tmp")
     assert result.passed is True
 
 
-def test_criteria_gate_fails_when_unmet_criteria():
+def test_review_gate_fails_when_unmet_criteria():
     task = _make_task()
     with patch("validator.run_claude") as mock_claude:
         mock_claude.return_value = MagicMock(
             success=True,
-            output='{"passed": false, "unmet": ["hello() returns \'hello world\'"]}'
+            output='{"passed": false, "reason": "incomplete", "unmet": ["hello() returns \'hello world\'"]}'
         )
-        result = run_criteria_gate(task, diff="+ def hello(): pass", cwd="/tmp")
+        result = run_review_gate(task, diff="+ def hello(): pass", cwd="/tmp")
     assert result.passed is False
     assert "hello() returns" in result.reason
 
 
-def test_criteria_gate_passes_when_no_acceptance_criteria():
-    task = Task(title="t", status=TaskStatus.PENDING, files=[], acceptance=[])
-    result = run_criteria_gate(task, diff="any diff", cwd="/tmp")
-    assert result.passed is True
-    assert "skipped" in result.reason.lower()
-
-
-def test_diff_review_gate_passes():
+def test_review_gate_fails_on_empty_diff():
     task = _make_task()
-    with patch("validator.run_claude") as mock_claude:
-        mock_claude.return_value = MagicMock(
-            success=True, output='{"passed": true, "reason": "task accomplished"}'
-        )
-        result = run_diff_review_gate(task, diff="+ def hello(): return 'hello world'", cwd="/tmp")
-    assert result.passed is True
-
-
-def test_diff_review_gate_fails():
-    task = _make_task()
-    with patch("validator.run_claude") as mock_claude:
-        mock_claude.return_value = MagicMock(
-            success=True,
-            output='{"passed": false, "reason": "function body not implemented"}'
-        )
-        result = run_diff_review_gate(task, diff="+ def hello(): pass", cwd="/tmp")
+    result = run_review_gate(task, diff="", cwd="/tmp")
     assert result.passed is False
-    assert "not implemented" in result.reason
+    assert "empty" in result.reason
+
+
+def test_review_gate_passes_with_no_criteria():
+    task = Task(title="t", status=TaskStatus.PENDING, files=[], acceptance=[])
+    with patch("validator.run_claude") as mock_claude:
+        mock_claude.return_value = MagicMock(
+            success=True, output='{"passed": true, "reason": "done", "unmet": []}'
+        )
+        result = run_review_gate(task, diff="+ some change", cwd="/tmp")
+    assert result.passed is True

@@ -14,13 +14,11 @@ from repo_detect import RepoConfig, detect_repo_config
 from validator import (
     ValidationResult,
     run_build_gate,
-    run_criteria_gate,
-    run_diff_review_gate,
+    run_review_gate,
     run_test_gate,
 )
 
 MAX_RETRIES = 2
-LOG_FILE = Path("runner.log")
 
 
 def parse_args():
@@ -33,33 +31,42 @@ def parse_args():
     return p.parse_args()
 
 
+_log_file: Path | None = None
+
+
 def log(msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line)
-    with LOG_FILE.open("a") as f:
-        f.write(line + "\n")
+    if _log_file:
+        with _log_file.open("a") as f:
+            f.write(line + "\n")
 
 
-def get_diff(repo_root: Path) -> str:
+def get_sha(repo_root: Path) -> str:
     result = subprocess.run(
-        ["git", "diff", "HEAD"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def get_diff(repo_root: Path, base_sha: str) -> str:
+    result = subprocess.run(
+        ["git", "diff", base_sha, "HEAD"],
+        cwd=repo_root, capture_output=True, text=True,
     )
     return result.stdout
 
 
-def validate_task(task: Task, cfg: RepoConfig, repo_root: Path) -> tuple[bool, str]:
+def validate_task(task: Task, cfg: RepoConfig, repo_root: Path, base_sha: str) -> tuple[bool, str]:
     cwd = str(repo_root)
-    diff = get_diff(repo_root)
+    diff = get_diff(repo_root, base_sha)
 
     gates = [
         (lambda: run_build_gate(cfg, cwd), "build"),
         (lambda: run_test_gate(cfg, cwd), "tests"),
-        (lambda: run_criteria_gate(task, diff, cwd), "criteria"),
-        (lambda: run_diff_review_gate(task, diff, cwd), "diff-review"),
+        (lambda: run_review_gate(task, diff, cwd), "review"),
     ]
 
     for gate_fn, gate_name in gates:
@@ -106,16 +113,24 @@ def run_loop(plan_path: Path, repo_root: Path, cfg: RepoConfig, dry_run: bool) -
             if failure_reason:
                 context += f"\n\n## Previous Attempt Failed\n{failure_reason}\nFix this and try again."
 
+            base_sha = get_sha(repo_root)
+
             try:
-                run_claude(context, cwd=str(repo_root))
+                result = run_claude(context, cwd=str(repo_root))
             except CreditExhaustedError as e:
                 log(f"Credits exhausted: {e}")
                 log("State saved. Remaining tasks still marked pending in plan.")
                 return
 
-            valid, reason = validate_task(task, cfg, repo_root)
+            if not result.success:
+                log(f"  Claude exited with error: {result.output[:200]}")
+
+            valid, reason = validate_task(task, cfg, repo_root, base_sha)
             if valid:
-                write_status(plan_path, task, TaskStatus.DONE)
+                try:
+                    write_status(plan_path, task, TaskStatus.DONE)
+                except ValueError as e:
+                    log(f"  Warning: could not update plan status: {e}")
                 completed.append(task)
                 log(f"✓ Done: {task.title}")
                 break
@@ -125,7 +140,10 @@ def run_loop(plan_path: Path, repo_root: Path, cfg: RepoConfig, dry_run: bool) -
                 if retries <= MAX_RETRIES:
                     log(f"  Retry {retries}/{MAX_RETRIES}: {reason}")
                 else:
-                    write_status(plan_path, task, TaskStatus.BLOCKED, reason=reason)
+                    try:
+                        write_status(plan_path, task, TaskStatus.BLOCKED, reason=reason)
+                    except ValueError as e:
+                        log(f"  Warning: could not update plan status: {e}")
                     blocked.append(task)
                     log(f"✗ Blocked after {MAX_RETRIES} retries: {task.title}")
                     break
@@ -140,6 +158,8 @@ def main():
         sys.exit(1)
 
     repo_root = args.repo or args.plan.parent
+    global _log_file
+    _log_file = args.plan.parent / "runner.log"
     cfg = detect_repo_config(repo_root, build_override=args.build, test_override=args.test)
     log(f"Build: {cfg.build_cmd or 'none'} | Test: {cfg.test_cmd or 'none'}")
 
