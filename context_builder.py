@@ -56,7 +56,7 @@ def _extract_anatomy(repo_root: Path, task_files: list[str]) -> str:
     for file_path in task_files:
         filename = Path(file_path).name
         for line in text.splitlines():
-            if filename in line and line.strip().startswith("-"):
+            if f"`{filename}`" in line and line.strip().startswith("-"):
                 matched_lines.append(line.strip())
 
     return "\n".join(matched_lines)

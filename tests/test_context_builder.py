@@ -86,3 +86,21 @@ def test_context_excludes_anatomy_when_missing(tmp_path):
         repo_root=tmp_path,
     )
     assert "Add hello" in ctx
+
+
+def test_anatomy_does_not_match_filename_substrings(tmp_path):
+    anatomy = tmp_path / ".wolf" / "anatomy.md"
+    anatomy.parent.mkdir()
+    anatomy.write_text(
+        "## src/\n"
+        "- `auth.py` — auth module (~40 tok)\n"
+        "- `authenticator.py` — full auth class (~200 tok)\n"
+    )
+    ctx = build_context(
+        task=_make_task(files=["src/auth.py"]),
+        completed=[],
+        blocked=[],
+        repo_root=tmp_path,
+    )
+    assert "auth module" in ctx
+    assert "full auth class" not in ctx
